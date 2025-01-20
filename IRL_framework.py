@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import os
 import uuid
 from datetime import datetime
@@ -9,13 +8,12 @@ from datetime import datetime
 # IRL Co-Creation Wizard for Hydrogen Technologies
 # 
 # Features:
-# 1) Passcode login ("DECODE"), optional name => "Anonymous" if blank.
+# 1) No passcode required.
 # 2) 5-step wizard: Introduction -> Method Categories -> Parent Attributes
 #    -> Child Attributes -> Final Comments.
 # 3) Full dictionary of child attributes (including "Utility") for each category.
-# 4) Stores feedback in a SQLite DB with possibility to delete
-#    their own feedback.
-# 5) No st.experimental_rerun / st.stop; uses a refresh flag approach.
+# 4) Stores feedback in a CSV file with all feedback visible to users.
+# 5) No use of st.experimental_rerun / st.stop; uses a refresh flag approach.
 # 6) Professional academic language suitable for consortium partners.
 ############################################################################
 
@@ -23,8 +21,8 @@ from datetime import datetime
 # GLOBAL CONFIG
 ########################
 
-PASSCODE = "DECODE"
-DB_NAME = "irl_feedback.db"
+# Name of the CSV file to store feedback
+FEEDBACK_CSV = "feedback.csv"
 
 # Wizard steps in order
 WIZARD_STEPS = [
@@ -328,148 +326,63 @@ CHILD_ATTRIBUTES_DICT = {
 }
 
 ###############################
-# 2) DATABASE FUNCTIONS
+# 3) HELPER FUNCTIONS
 ###############################
 
-def init_db():
+def initialize_feedback_csv():
     """
-    Initialize the SQLite database and create the feedback table if it doesn't exist.
+    Initialize the feedback CSV file if it does not exist.
     """
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            user_name TEXT,
-            step TEXT,
-            section TEXT,
-            feedback TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    if not os.path.exists(FEEDBACK_CSV):
+        df = pd.DataFrame(columns=["user_id", "user_name", "step", "section", "feedback", "timestamp"])
+        df.to_csv(FEEDBACK_CSV, index=False)
 
-def add_feedback(user_id, user_name, step, section, feedback):
+def append_feedback(user_id, user_name, step, section, feedback):
     """
-    Add a new feedback entry to the database.
+    Append a new feedback entry to the CSV file using pd.concat.
     """
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO feedback (user_id, user_name, step, section, feedback)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, user_name, step, section, feedback.strip()))
-    conn.commit()
-    conn.close()
-
-def get_feedback(step, section=None):
-    """
-    Retrieve feedback entries filtered by step and optionally by section.
-    Returns a list of dictionaries.
-    """
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    if section:
-        c.execute("""
-            SELECT id, user_id, user_name, step, section, feedback, created_at 
-            FROM feedback 
-            WHERE step = ? AND section = ?
-            ORDER BY created_at ASC
-        """, (step, section))
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_entry = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "step": step,
+        "section": section,
+        "feedback": feedback,
+        "timestamp": timestamp
+    }
+    if os.path.exists(FEEDBACK_CSV):
+        df = pd.read_csv(FEEDBACK_CSV)
     else:
-        c.execute("""
-            SELECT id, user_id, user_name, step, section, feedback, created_at 
-            FROM feedback 
-            WHERE step = ?
-            ORDER BY created_at ASC
-        """, (step,))
-    rows = c.fetchall()
-    conn.close()
-    
-    feedback_list = []
-    for row in rows:
-        feedback_list.append({
-            "id": row[0],
-            "user_id": row[1],
-            "user_name": row[2] if row[2] else "Anonymous",
-            "step": row[3],
-            "section": row[4],
-            "feedback": row[5],
-            "created_at": row[6]
-        })
-    return feedback_list
+        df = pd.DataFrame(columns=["user_id", "user_name", "step", "section", "feedback", "timestamp"])
+    new_df = pd.DataFrame([new_entry])
+    df = pd.concat([df, new_df], ignore_index=True)
+    df.to_csv(FEEDBACK_CSV, index=False)
 
-def delete_feedback(record_id, user_id):
+def load_feedback(step, section=None):
     """
-    Delete a feedback entry if it belongs to the current user.
-    Returns True if deletion was successful, False otherwise.
+    Load feedback entries from the CSV file filtered by step and optionally by section.
+    Returns a DataFrame.
     """
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        DELETE FROM feedback
-        WHERE id = ? AND user_id = ?
-    """, (record_id, user_id))
-    conn.commit()
-    rowcount = c.rowcount
-    conn.close()
-    return rowcount > 0
+    if not os.path.exists(FEEDBACK_CSV):
+        return pd.DataFrame()
+    df = pd.read_csv(FEEDBACK_CSV)
+    if section:
+        filtered_df = df[(df["step"] == step) & (df["section"] == section)]
+    else:
+        filtered_df = df[df["step"] == step]
+    return filtered_df
 
-###############################
-# 3) HELPER DISPLAY FUNCTIONS
-###############################
-
-def display_feedback_entries(entries):
+def display_feedback(df):
     """
-    Display a list of feedback entries.
-    Allows users to delete their own feedback entries.
+    Display feedback entries from a DataFrame.
     """
-    if not entries:
+    if df.empty:
         st.info("No feedback submitted yet for this section.")
-        return
-    
-    for entry in entries:
-        user_display = entry["user_name"]
-        timestamp = entry["created_at"]
-        feedback_text = entry["feedback"]
-        st.markdown(f"**User**: {user_display} | **Time**: {timestamp}")
-        st.write(feedback_text)
-        
-        # If the feedback belongs to the current user, show a delete button
-        if entry["user_id"] == st.session_state["user_id"]:
-            delete_key = f"delete_{entry['id']}"
-            if st.button("Delete", key=delete_key):
-                success = delete_feedback(entry["id"], st.session_state["user_id"])
-                if success:
-                    st.success("Your feedback has been deleted.")
-                    # Refresh the page to reflect deletion
-                    st.session_state["_refresh_flag"] = not st.session_state["_refresh_flag"]
-                else:
-                    st.error("Failed to delete feedback. Please try again.")
-        
-        st.markdown("---")
-
-def collect_feedback(step, section_label):
-    """
-    Provide a text area and submit button for collecting feedback.
-    """
-    feedback_text = st.text_area("Your Feedback:", key=f"feedback_{step}_{section_label}", height=100)
-    if st.button("Submit Feedback", key=f"submit_{step}_{section_label}"):
-        if feedback_text.strip() == "":
-            st.warning("Please enter some feedback before submitting.")
-        else:
-            add_feedback(
-                user_id=st.session_state["user_id"],
-                user_name=st.session_state["user_name"],
-                step=step,
-                section=section_label,
-                feedback=feedback_text
-            )
-            st.success("Thank you! Your feedback has been recorded.")
-            # Refresh to show the new feedback
-            st.session_state["_refresh_flag"] = not st.session_state["_refresh_flag"]
+    else:
+        for idx, row in df.iterrows():
+            st.markdown(f"**User**: {row['user_name']} | **Time**: {row['timestamp']}")
+            st.write(row['feedback'])
+            st.markdown("---")
 
 ###############################
 # 4) WIZARD STEP FUNCTIONS
@@ -511,11 +424,23 @@ def step_introduction():
     )
     
     st.subheader("General Feedback on Introduction")
-    collect_feedback("Introduction", "GeneralIntro")
+    feedback = st.text_area("Your Feedback:", key="feedback_Introduction_GeneralIntro", height=100)
+    if st.button("Submit Feedback", key="submit_Introduction_GeneralIntro"):
+        if feedback.strip() == "":
+            st.warning("Please enter some feedback before submitting.")
+        else:
+            append_feedback(
+                user_id=st.session_state["user_id"],
+                user_name=st.session_state["user_name"],
+                step="Introduction",
+                section="GeneralIntro",
+                feedback=feedback
+            )
+            st.success("Thank you! Your feedback has been recorded.")
     
     st.markdown("#### Existing Feedback")
-    intro_feedback = get_feedback("Introduction", "GeneralIntro")
-    display_feedback_entries(intro_feedback)
+    existing_feedback = load_feedback("Introduction", "GeneralIntro")
+    display_feedback(existing_feedback)
 
 def step_method_categories():
     """
@@ -540,11 +465,26 @@ def step_method_categories():
     
     chosen_cat = st.selectbox("Select a category to comment on (or 'General'):", ["General"] + METHOD_CATEGORIES)
     section_label = chosen_cat if chosen_cat != "General" else "GeneralCategories"
-    collect_feedback("Method Categories", section_label)
+    
+    feedback_key = f"feedback_Method Categories_{section_label}"
+    feedback = st.text_area("Your Feedback:", key=feedback_key, height=100)
+    
+    if st.button("Submit Feedback", key=f"submit_Method Categories_{section_label}"):
+        if feedback.strip() == "":
+            st.warning("Please enter some feedback before submitting.")
+        else:
+            append_feedback(
+                user_id=st.session_state["user_id"],
+                user_name=st.session_state["user_name"],
+                step="Method Categories",
+                section=section_label,
+                feedback=feedback
+            )
+            st.success("Thank you! Your feedback has been recorded.")
     
     st.markdown("#### Existing Feedback")
-    method_cat_feedback = get_feedback("Method Categories", section_label)
-    display_feedback_entries(method_cat_feedback)
+    existing_feedback = load_feedback("Method Categories", section_label)
+    display_feedback(existing_feedback)
 
 def step_parent_attributes():
     """
@@ -569,11 +509,26 @@ def step_parent_attributes():
     
     attr_choice = st.selectbox("Select an attribute to comment on (or 'General'):", ["General"] + PARENT_ATTRIBUTES)
     section_label = attr_choice if attr_choice != "General" else "GeneralAttributes"
-    collect_feedback("Parent Attributes", section_label)
+    
+    feedback_key = f"feedback_Parent Attributes_{section_label}"
+    feedback = st.text_area("Your Feedback:", key=feedback_key, height=100)
+    
+    if st.button("Submit Feedback", key=f"submit_Parent Attributes_{section_label}"):
+        if feedback.strip() == "":
+            st.warning("Please enter some feedback before submitting.")
+        else:
+            append_feedback(
+                user_id=st.session_state["user_id"],
+                user_name=st.session_state["user_name"],
+                step="Parent Attributes",
+                section=section_label,
+                feedback=feedback
+            )
+            st.success("Thank you! Your feedback has been recorded.")
     
     st.markdown("#### Existing Feedback")
-    parent_attr_feedback = get_feedback("Parent Attributes", section_label)
-    display_feedback_entries(parent_attr_feedback)
+    existing_feedback = load_feedback("Parent Attributes", section_label)
+    display_feedback(existing_feedback)
 
 def step_child_attributes():
     """
@@ -642,11 +597,25 @@ def step_child_attributes():
     section_label = f"{cat_choice} | {attr_choice} | {child_feat_choice}"
     
     # Collect feedback for the selected child attribute
-    collect_feedback("Child Attributes", section_label)
+    feedback_key = f"feedback_Child Attributes_{section_label}"
+    feedback = st.text_area("Your Feedback:", key=feedback_key, height=100)
+    
+    if st.button("Submit Feedback", key=f"submit_Child Attributes_{section_label}"):
+        if feedback.strip() == "":
+            st.warning("Please enter some feedback before submitting.")
+        else:
+            append_feedback(
+                user_id=st.session_state["user_id"],
+                user_name=st.session_state["user_name"],
+                step="Child Attributes",
+                section=section_label,
+                feedback=feedback
+            )
+            st.success("Thank you! Your feedback has been recorded.")
     
     st.markdown("#### Existing Feedback")
-    child_attr_feedback = get_feedback("Child Attributes", section_label)
-    display_feedback_entries(child_attr_feedback)
+    existing_feedback = load_feedback("Child Attributes", section_label)
+    display_feedback(existing_feedback)
 
 def step_final_comments():
     """
@@ -670,11 +639,25 @@ def step_final_comments():
     )
     
     section_label = "OverallFinal"
-    collect_feedback("Final Comments", section_label)
+    feedback_key = f"feedback_Final Comments_{section_label}"
+    feedback = st.text_area("Your Final Thoughts:", key=feedback_key, height=150)
+    
+    if st.button("Submit Final Comments", key=f"submit_Final Comments_{section_label}"):
+        if feedback.strip() == "":
+            st.warning("Please enter some final thoughts before submitting.")
+        else:
+            append_feedback(
+                user_id=st.session_state["user_id"],
+                user_name=st.session_state["user_name"],
+                step="Final Comments",
+                section=section_label,
+                feedback=feedback
+            )
+            st.success("Thank you! Your final comments have been recorded.")
     
     st.markdown("#### Existing Feedback")
-    final_comments = get_feedback("Final Comments", section_label)
-    display_feedback_entries(final_comments)
+    final_comments = load_feedback("Final Comments", section_label)
+    display_feedback(final_comments)
     
     st.success("Your participation is greatly appreciated. Thank you for contributing to the development of the IRL framework!")
 
@@ -729,22 +712,26 @@ def render_current_step():
 
 def login_page():
     """
-    Displays the login page requiring passcode and optional username.
+    Displays the login page requiring optional username.
     """
-    st.title("IRL Co-Creation - Secure Login")
-    passcode = st.text_input("Enter Passcode:", type="password")
+    st.title("IRL Co-Creation - Welcome")
+    st.markdown(
+        """
+        **Welcome to the IRL Framework Co-Creation Wizard.**
+        
+        Please enter your name below to start. If you prefer to remain anonymous, you can leave the name field blank.
+        """
+    )
+    
     user_name = st.text_input("Enter Your Name (Optional):", value="")
     
-    if st.button("Login"):
-        if passcode == PASSCODE:
-            st.session_state["logged_in"] = True
-            st.session_state["current_step"] = 0
-            # Generate a unique user session ID
-            st.session_state["user_id"] = str(uuid.uuid4())
-            st.session_state["user_name"] = user_name.strip() if user_name.strip() else "Anonymous"
-            st.session_state["_refresh_flag"] = not st.session_state["_refresh_flag"]  # Trigger refresh
-        else:
-            st.error("Incorrect passcode. Please try again.")
+    if st.button("Start"):
+        # Generate a unique user session ID
+        st.session_state["logged_in"] = True
+        st.session_state["current_step"] = 0
+        st.session_state["user_id"] = str(uuid.uuid4())
+        st.session_state["user_name"] = user_name.strip() if user_name.strip() else "Anonymous"
+        st.session_state["_refresh_flag"] = not st.session_state["_refresh_flag"]  # Trigger refresh
 
 ###############################
 # 7) MAIN APP FUNCTION
@@ -754,9 +741,6 @@ def main():
     """
     The main function to run the Streamlit app.
     """
-    # Initialize the database
-    init_db()
-    
     # Initialize session state variables if they don't exist
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
@@ -768,6 +752,9 @@ def main():
         st.session_state["current_step"] = 0
     if "_refresh_flag" not in st.session_state:
         st.session_state["_refresh_flag"] = False
+    
+    # Initialize the feedback CSV file
+    initialize_feedback_csv()
     
     # Display login or wizard based on session state
     if not st.session_state["logged_in"]:
