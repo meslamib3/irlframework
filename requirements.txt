@@ -1,1 +1,2 @@
-pandas==1.5.3  # Update as per compatibility
+streamlit==1.25.0
+pandas==2.0.3
